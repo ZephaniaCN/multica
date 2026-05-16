@@ -46,7 +46,7 @@ import {
 import { StatusIcon, PriorityIcon } from ".";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
+import { memberListOptions, agentListOptions, squadListOptions } from "@multica/core/workspace/queries";
 import { projectListOptions } from "@multica/core/projects/queries";
 import { labelListOptions } from "@multica/core/labels/queries";
 import { ProjectIcon } from "../../projects/components/project-icon";
@@ -54,6 +54,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { LabelChip } from "../../labels/label-chip";
 import {
   SORT_OPTIONS,
+  GROUPING_OPTIONS,
   CARD_PROPERTY_OPTIONS,
   type ActorFilterValue,
 } from "@multica/core/issues/stores/view-store";
@@ -65,6 +66,7 @@ import {
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
 import type { Issue } from "@multica/core/types";
 import { useT } from "../../i18n";
+import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
 // ---------------------------------------------------------------------------
 // HoverCheck — shadcn official pattern (PR #6862)
@@ -168,6 +170,7 @@ function ActorSubContent({
   includeNoAssignee,
   onToggleNoAssignee,
   noAssigneeCount,
+  showSquads = true,
 }: {
   counts: Map<string, number>;
   selected: ActorFilterValue[];
@@ -176,21 +179,26 @@ function ActorSubContent({
   includeNoAssignee?: boolean;
   onToggleNoAssignee?: () => void;
   noAssigneeCount?: number;
+  showSquads?: boolean;
 }) {
   const { t } = useT("issues");
   const [search, setSearch] = useState("");
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const { data: squads = [] } = useQuery(squadListOptions(wsId));
   const query = search.trim().toLowerCase();
   const filteredMembers = members.filter((m) =>
-    m.name.toLowerCase().includes(query),
+    m.name.toLowerCase().includes(query) || matchesPinyin(m.name, query),
   );
   const filteredAgents = agents.filter((a) =>
-    !a.archived_at && a.name.toLowerCase().includes(query),
+    !a.archived_at && (a.name.toLowerCase().includes(query) || matchesPinyin(a.name, query)),
+  );
+  const filteredSquads = squads.filter((s) =>
+    !s.archived_at && (s.name.toLowerCase().includes(query) || matchesPinyin(s.name, query)),
   );
 
-  const isSelected = (type: "member" | "agent", id: string) =>
+  const isSelected = (type: "member" | "agent" | "squad", id: string) =>
     selected.some((f) => f.type === type && f.id === id);
 
   return (
@@ -283,7 +291,36 @@ function ActorSubContent({
           </DropdownMenuGroup>
         )}
 
-        {filteredMembers.length === 0 && filteredAgents.length === 0 && search && (
+        {showSquads && filteredSquads.length > 0 && (
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>{t(($) => $.filters.squads_group)}</DropdownMenuLabel>
+            {filteredSquads.map((s) => {
+              const checked = isSelected("squad", s.id);
+              const count = counts.get(`squad:${s.id}`) ?? 0;
+              return (
+                <DropdownMenuCheckboxItem
+                  key={s.id}
+                  checked={checked}
+                  onCheckedChange={() =>
+                    onToggle({ type: "squad", id: s.id })
+                  }
+                  className={FILTER_ITEM_CLASS}
+                >
+                  <HoverCheck checked={checked} />
+                  <ActorAvatar actorType="squad" actorId={s.id} size={18} />
+                  <span className="truncate">{s.name}</span>
+                  {count > 0 && (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {count}
+                    </span>
+                  )}
+                </DropdownMenuCheckboxItem>
+              );
+            })}
+          </DropdownMenuGroup>
+        )}
+
+        {filteredMembers.length === 0 && filteredAgents.length === 0 && (!showSquads || filteredSquads.length === 0) && search && (
           <div className="px-2 py-3 text-center text-sm text-muted-foreground">
             {t(($) => $.filters.no_results)}
           </div>
@@ -457,52 +494,6 @@ export function IssuesHeader({ scopedIssues }: { scopedIssues: Issue[] }) {
   const { t } = useT("issues");
   const scope = useIssuesScopeStore((s) => s.scope);
   const setScope = useIssuesScopeStore((s) => s.setScope);
-
-  const viewMode = useViewStore((s) => s.viewMode);
-  const statusFilters = useViewStore((s) => s.statusFilters);
-  const priorityFilters = useViewStore((s) => s.priorityFilters);
-  const assigneeFilters = useViewStore((s) => s.assigneeFilters);
-  const includeNoAssignee = useViewStore((s) => s.includeNoAssignee);
-  const creatorFilters = useViewStore((s) => s.creatorFilters);
-  const projectFilters = useViewStore((s) => s.projectFilters);
-  const includeNoProject = useViewStore((s) => s.includeNoProject);
-  const labelFilters = useViewStore((s) => s.labelFilters);
-  const sortBy = useViewStore((s) => s.sortBy);
-  const sortDirection = useViewStore((s) => s.sortDirection);
-  const cardProperties = useViewStore((s) => s.cardProperties);
-  const act = useViewStoreApi().getState();
-
-  const counts = useIssueCounts(scopedIssues);
-
-  const hasActiveFilters =
-    getActiveFilterCount({
-      statusFilters,
-      priorityFilters,
-      assigneeFilters,
-      includeNoAssignee,
-      creatorFilters,
-      projectFilters,
-      includeNoProject,
-      labelFilters,
-    }) > 0;
-
-  const SORT_LABEL_KEY: Record<typeof SORT_OPTIONS[number]["value"], "sort_manual" | "sort_priority" | "sort_due_date" | "sort_created" | "sort_title"> = {
-    position: "sort_manual",
-    priority: "sort_priority",
-    due_date: "sort_due_date",
-    created_at: "sort_created",
-    title: "sort_title",
-  };
-  const CARD_PROPERTY_LABEL_KEY: Record<typeof CARD_PROPERTY_OPTIONS[number]["key"], "card_priority" | "card_description" | "card_assignee" | "card_due_date" | "card_project" | "card_labels" | "card_child_progress"> = {
-    priority: "card_priority",
-    description: "card_description",
-    assignee: "card_assignee",
-    dueDate: "card_due_date",
-    project: "card_project",
-    labels: "card_labels",
-    childProgress: "card_child_progress",
-  };
-  const sortLabel = t(($) => $.display[SORT_LABEL_KEY[sortBy]]);
   const SCOPE_LABEL_KEY: Record<IssuesScope, "all_label" | "members_label" | "agents_label"> = {
     all: "all_label",
     members: "members_label",
@@ -541,8 +532,67 @@ export function IssuesHeader({ scopedIssues }: { scopedIssues: Issue[] }) {
         ))}
       </div>
 
-      {/* Right: filter + display + view toggle */}
-      <div className="flex items-center gap-1">
+      <IssueDisplayControls scopedIssues={scopedIssues} />
+    </div>
+  );
+}
+
+export function IssueDisplayControls({ scopedIssues }: { scopedIssues: Issue[] }) {
+  const { t } = useT("issues");
+  const viewMode = useViewStore((s) => s.viewMode);
+  const statusFilters = useViewStore((s) => s.statusFilters);
+  const priorityFilters = useViewStore((s) => s.priorityFilters);
+  const assigneeFilters = useViewStore((s) => s.assigneeFilters);
+  const includeNoAssignee = useViewStore((s) => s.includeNoAssignee);
+  const creatorFilters = useViewStore((s) => s.creatorFilters);
+  const projectFilters = useViewStore((s) => s.projectFilters);
+  const includeNoProject = useViewStore((s) => s.includeNoProject);
+  const labelFilters = useViewStore((s) => s.labelFilters);
+  const sortBy = useViewStore((s) => s.sortBy);
+  const sortDirection = useViewStore((s) => s.sortDirection);
+  const grouping = useViewStore((s) => s.grouping);
+  const cardProperties = useViewStore((s) => s.cardProperties);
+  const act = useViewStoreApi().getState();
+
+  const counts = useIssueCounts(scopedIssues);
+
+  const hasActiveFilters =
+    getActiveFilterCount({
+      statusFilters,
+      priorityFilters,
+      assigneeFilters,
+      includeNoAssignee,
+      creatorFilters,
+      projectFilters,
+      includeNoProject,
+      labelFilters,
+    }) > 0;
+
+  const SORT_LABEL_KEY: Record<typeof SORT_OPTIONS[number]["value"], "sort_manual" | "sort_priority" | "sort_due_date" | "sort_created" | "sort_title"> = {
+    position: "sort_manual",
+    priority: "sort_priority",
+    due_date: "sort_due_date",
+    created_at: "sort_created",
+    title: "sort_title",
+  };
+  const GROUPING_LABEL_KEY: Record<typeof GROUPING_OPTIONS[number]["value"], "group_status" | "group_assignee"> = {
+    status: "group_status",
+    assignee: "group_assignee",
+  };
+  const CARD_PROPERTY_LABEL_KEY: Record<typeof CARD_PROPERTY_OPTIONS[number]["key"], "card_priority" | "card_description" | "card_assignee" | "card_due_date" | "card_project" | "card_labels" | "card_child_progress"> = {
+    priority: "card_priority",
+    description: "card_description",
+    assignee: "card_assignee",
+    dueDate: "card_due_date",
+    project: "card_project",
+    labels: "card_labels",
+    childProgress: "card_child_progress",
+  };
+  const sortLabel = t(($) => $.display[SORT_LABEL_KEY[sortBy]]);
+  const groupingLabel = t(($) => $.display[GROUPING_LABEL_KEY[grouping]]);
+
+  return (
+    <div className="flex items-center gap-1">
         {/* Filter */}
         <DropdownMenu>
           <Tooltip>
@@ -675,6 +725,7 @@ export function IssuesHeader({ scopedIssues }: { scopedIssues: Issue[] }) {
                   counts={counts.creator}
                   selected={creatorFilters}
                   onToggle={act.toggleCreatorFilter}
+                  showSquads={false}
                 />
               </DropdownMenuSubContent>
             </DropdownMenuSub>
@@ -751,6 +802,40 @@ export function IssuesHeader({ scopedIssues }: { scopedIssues: Issue[] }) {
             <TooltipContent side="bottom">{t(($) => $.display.tooltip)}</TooltipContent>
           </Tooltip>
           <PopoverContent align="end" className="w-64 p-0">
+            {viewMode === "board" && (
+              <div className="border-b px-3 py-2.5">
+                <span className="text-xs font-medium text-muted-foreground">
+                  {t(($) => $.display.grouping_section)}
+                </span>
+                <div className="mt-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      render={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full justify-between text-xs"
+                        >
+                          {groupingLabel}
+                          <ChevronDown className="size-3 text-muted-foreground" />
+                        </Button>
+                      }
+                    />
+                    <DropdownMenuContent align="start" className="w-auto">
+                      {GROUPING_OPTIONS.map((opt) => (
+                        <DropdownMenuItem
+                          key={opt.value}
+                          onClick={() => act.setGrouping(opt.value)}
+                        >
+                          {t(($) => $.display[GROUPING_LABEL_KEY[opt.value]])}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+            )}
+
             <div className="border-b px-3 py-2.5">
               <span className="text-xs font-medium text-muted-foreground">
                 {t(($) => $.display.ordering_section)}
@@ -856,7 +941,6 @@ export function IssuesHeader({ scopedIssues }: { scopedIssues: Issue[] }) {
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
     </div>
   );
 }

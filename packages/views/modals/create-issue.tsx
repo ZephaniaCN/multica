@@ -100,8 +100,18 @@ export function ManualCreatePanel({
   const [status, setStatus] = useState<IssueStatus>((data?.status as IssueStatus) || draft.status);
   const [priority, setPriority] = useState<IssuePriority>(draft.priority);
   const [submitting, setSubmitting] = useState(false);
-  const [assigneeType, setAssigneeType] = useState<IssueAssigneeType | undefined>(draft.assigneeType);
-  const [assigneeId, setAssigneeId] = useState<string | undefined>(draft.assigneeId);
+  const [assigneeType, setAssigneeType] = useState<IssueAssigneeType | undefined>(() => {
+    if (data && "assignee_type" in data) {
+      return (data.assignee_type as IssueAssigneeType | null) ?? undefined;
+    }
+    return draft.assigneeType;
+  });
+  const [assigneeId, setAssigneeId] = useState<string | undefined>(() => {
+    if (data && "assignee_id" in data) {
+      return (data.assignee_id as string | null) ?? undefined;
+    }
+    return draft.assigneeId;
+  });
   const [dueDate, setDueDate] = useState<string | null>(draft.dueDate);
   const [projectId, setProjectId] = useState<string | undefined>(
     (data?.project_id as string) || undefined,
@@ -265,15 +275,20 @@ export function ManualCreatePanel({
   // Also forward the picked project so the agent panel pins the new issue
   // to it; without this the agent panel would fall back to its persisted
   // `lastProjectId`, silently routing the issue to the wrong project.
+  // Forward squad picks alongside agent picks so the agent panel honors
+  // the actor the user already chose — otherwise a squad selection silently
+  // falls back to the persisted actor / first visible agent on flip.
   const switchToAgent = () => {
     const desc = descEditorRef.current?.getMarkdown()?.trim() ?? "";
     const prompt = [title.trim(), desc].filter(Boolean).join("\n\n");
     setLastMode("agent");
     onSwitchMode?.({
       prompt,
-      ...(assigneeType === "agent" && assigneeId
+      ...(assigneeId && assigneeType === "agent"
         ? { agent_id: assigneeId }
-        : {}),
+        : assigneeId && assigneeType === "squad"
+          ? { squad_id: assigneeId }
+          : {}),
       ...(projectId ? { project_id: projectId } : {}),
     });
   };
@@ -357,7 +372,7 @@ export function ManualCreatePanel({
             </div>
 
             {/* Description — takes remaining space */}
-            <div {...descDropZoneProps} className="relative flex-1 min-h-0 overflow-y-auto px-5">
+            <div {...descDropZoneProps} className="relative flex flex-1 min-h-0 overflow-y-auto px-5">
               <ContentEditor
                 ref={descEditorRef}
                 defaultValue={draft.description}

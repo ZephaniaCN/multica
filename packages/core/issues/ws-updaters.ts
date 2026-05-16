@@ -5,8 +5,8 @@ import {
   addIssueToBuckets,
   findIssueLocation,
   patchIssueInBuckets,
-  removeIssueFromBuckets,
 } from "./cache-helpers";
+import { cleanupDeletedIssueCaches } from "./delete-cache";
 import type { Issue, IssueLabelsResponse, Label } from "../types";
 import type { ListIssuesCache } from "../types";
 
@@ -19,6 +19,8 @@ export function onIssueCreated(
     old ? addIssueToBuckets(old, issue) : old,
   );
   qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
   if (issue.parent_issue_id) {
     qc.invalidateQueries({ queryKey: issueKeys.children(wsId, issue.parent_issue_id) });
     qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
@@ -48,6 +50,8 @@ export function onIssueUpdated(
     old ? patchIssueInBuckets(old, issue.id, issue) : old,
   );
   qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
   qc.setQueryData<Issue>(issueKeys.detail(wsId, issue.id), (old) =>
     old ? { ...old, ...issue } : old,
   );
@@ -100,6 +104,8 @@ export function onIssueLabelsChanged(
     old ? { ...old, labels } : old,
   );
   qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
 }
 
 export function onIssueDeleted(
@@ -107,21 +113,7 @@ export function onIssueDeleted(
   wsId: string,
   issueId: string,
 ) {
-  // Look up the issue before removing it to check for parent_issue_id
-  const listData = qc.getQueryData<ListIssuesCache>(issueKeys.list(wsId));
-  const deleted = listData ? findIssueLocation(listData, issueId)?.issue : undefined;
-
-  qc.setQueryData<ListIssuesCache>(issueKeys.list(wsId), (old) =>
-    old ? removeIssueFromBuckets(old, issueId) : old,
-  );
-  qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
-  qc.removeQueries({ queryKey: issueKeys.detail(wsId, issueId) });
-  qc.removeQueries({ queryKey: issueKeys.timeline(issueId) });
-  qc.removeQueries({ queryKey: issueKeys.reactions(issueId) });
-  qc.removeQueries({ queryKey: issueKeys.subscribers(issueId) });
-  qc.removeQueries({ queryKey: issueKeys.children(wsId, issueId) });
-  if (deleted?.parent_issue_id) {
-    qc.invalidateQueries({ queryKey: issueKeys.children(wsId, deleted.parent_issue_id) });
-    qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
-  }
+  cleanupDeletedIssueCaches(qc, wsId, issueId);
+  qc.invalidateQueries({ queryKey: issueKeys.assigneeGroupsAll(wsId) });
+  qc.invalidateQueries({ queryKey: issueKeys.myAssigneeGroupsAll(wsId) });
 }
