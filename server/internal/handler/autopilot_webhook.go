@@ -734,8 +734,13 @@ func parseDeclaredWebhookActions(actionPart string) map[string]struct{} {
 
 func splitWebhookEvent(event string) (provider, name, action string) {
 	parts := strings.Split(event, ".")
-	if len(parts) >= 3 && parts[0] == "github" {
-		return parts[0], parts[1], strings.Join(parts[2:], ".")
+	if parts[0] == "github" {
+		if len(parts) >= 3 {
+			return parts[0], parts[1], strings.Join(parts[2:], ".")
+		}
+		if len(parts) == 2 {
+			return parts[0], parts[1], ""
+		}
 	}
 	if len(parts) >= 2 {
 		return "", parts[0], strings.Join(parts[1:], ".")
