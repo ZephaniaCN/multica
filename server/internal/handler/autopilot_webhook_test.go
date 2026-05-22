@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // ── Token generation ────────────────────────────────────────────────────────
@@ -212,5 +215,71 @@ func TestNormalizeWebhookPayload_XEventTypeHeader(t *testing.T) {
 	}
 	if env.Event != "custom.thing" {
 		t.Fatalf("event: %q", env.Event)
+	}
+}
+
+// ── Description-declared event scope ────────────────────────────────────────
+
+func TestWebhookEventAllowedByAutopilotScope_NoDeclaredScopeAllowsAll(t *testing.T) {
+	ap := db.Autopilot{Description: pgtype.Text{String: "plain instructions", Valid: true}}
+	env := WebhookEnvelope{Event: "github.workflow_run.in_progress", EventPayload: json.RawMessage(`{"action":"in_progress"}`)}
+	if !webhookEventAllowedByAutopilotScope(ap, env) {
+		t.Fatal("autopilot without a declared event block should allow the event")
+	}
+}
+
+func TestWebhookEventAllowedByAutopilotScope_FiltersUndeclaredAction(t *testing.T) {
+	ap := db.Autopilot{Description: pgtype.Text{String: `职责：GitHub CI / Checks 失败事件响应。
+
+处理事件：
+- workflow_run: completed
+- check_suite: completed
+- status: error, failure
+
+动作：
+- 只处理终态事件。`, Valid: true}}
+	env := WebhookEnvelope{Event: "github.workflow_run.in_progress", EventPayload: json.RawMessage(`{"action":"in_progress"}`)}
+	if webhookEventAllowedByAutopilotScope(ap, env) {
+		t.Fatal("workflow_run.in_progress should be filtered by the declared completed-only scope")
+	}
+}
+
+func TestWebhookEventAllowedByAutopilotScope_AllowsDeclaredAction(t *testing.T) {
+	ap := db.Autopilot{Description: pgtype.Text{String: `处理事件：
+- workflow_run: completed
+
+动作：
+- 只处理终态事件。`, Valid: true}}
+	env := WebhookEnvelope{Event: "github.workflow_run.completed", EventPayload: json.RawMessage(`{"action":"completed"}`)}
+	if !webhookEventAllowedByAutopilotScope(ap, env) {
+		t.Fatal("workflow_run.completed should match the declared scope")
+	}
+}
+
+func TestWebhookEventAllowedByAutopilotScope_AllowsProviderQualifiedRule(t *testing.T) {
+	ap := db.Autopilot{Description: pgtype.Text{String: `处理事件：
+- github.workflow_run.completed
+
+动作：
+- 只处理终态事件。`, Valid: true}}
+	env := WebhookEnvelope{Event: "github.workflow_run.completed", EventPayload: json.RawMessage(`{"action":"completed"}`)}
+	if !webhookEventAllowedByAutopilotScope(ap, env) {
+		t.Fatal("provider-qualified rule should match the same event")
+	}
+}
+
+func TestWebhookEventAllowedByAutopilotScope_UsesPayloadStateForStatus(t *testing.T) {
+	ap := db.Autopilot{Description: pgtype.Text{String: `处理事件：
+- status: error, failure
+
+动作：
+- 只处理失败 status。`, Valid: true}}
+	allowed := WebhookEnvelope{Event: "github.status", EventPayload: json.RawMessage(`{"state":"failure"}`)}
+	if !webhookEventAllowedByAutopilotScope(ap, allowed) {
+		t.Fatal("github.status with state=failure should match status: failure")
+	}
+	filtered := WebhookEnvelope{Event: "github.status", EventPayload: json.RawMessage(`{"state":"success"}`)}
+	if webhookEventAllowedByAutopilotScope(ap, filtered) {
+		t.Fatal("github.status with state=success should be filtered")
 	}
 }

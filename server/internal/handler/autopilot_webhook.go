@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"regexp"
 	"strings"
 	"time"
 
@@ -322,10 +323,12 @@ func selectedHeadersJSON(headers http.Header) []byte {
 //  9. If signature invalid/missing: UPDATE delivery → rejected, return 401.
 //  10. If trigger disabled / autopilot paused / archived: UPDATE delivery →
 //     ignored, return 200.
-//  11. Dispatch the autopilot synchronously. UPDATE delivery → dispatched
+//  11. If the event is outside a description-declared event scope: UPDATE
+//     delivery → ignored, return 200.
+//  12. Dispatch the autopilot synchronously. UPDATE delivery → dispatched
 //     (with autopilot_run_id) or failed. Return 200 (skipped runs surface
 //     their `reason`).
-//  12. Bump last_fired_at after dispatch — even on the skipped path — so the
+//  13. Bump last_fired_at after dispatch — even on the skipped path — so the
 //     trigger's "last seen" is accurate.
 //
 // Response shapes:
@@ -523,7 +526,24 @@ func (h *Handler) HandleAutopilotWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 11. Dispatch synchronously. DispatchAutopilot publishes WS events,
+	// 11. Description-declared event scope → ignored. The current webhook UI
+	// lets operators express GitHub scope in the autopilot instructions (for
+	// example "处理事件：- workflow_run: completed"). Filtering that scope here
+	// keeps obvious no-op deliveries visible in the Delivery log without
+	// creating agent runs/tasks that would later say "ignored" expensively.
+	if !webhookEventAllowedByAutopilotScope(autopilot, envelope) {
+		respBody := map[string]any{
+			"status":      "ignored",
+			"delivery_id": uuidToString(delivery.ID),
+			"reason":      "event_filtered",
+			"event":       envelope.Event,
+		}
+		h.finaliseDeliveryTerminal(r, delivery.ID, deliveryStatusIgnored, http.StatusOK, respBody, "event_filtered")
+		writeJSON(w, http.StatusOK, respBody)
+		return
+	}
+
+	// 12. Dispatch synchronously. DispatchAutopilot publishes WS events,
 	//     persists trigger_payload on autopilot_run, runs the admission
 	//     check (offline runtime → skipped), and bumps last_run_at.
 	run, err := h.AutopilotService.DispatchAutopilot(
@@ -553,7 +573,7 @@ func (h *Handler) HandleAutopilotWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 12. Bump last_fired_at after dispatch returns — including the skipped
+	// 13. Bump last_fired_at after dispatch returns — including the skipped
 	//     path — so paused early-returns above don't corrupt "last fired".
 	if err := h.Queries.TouchAutopilotTriggerFiredAt(r.Context(), trigRow.ID); err != nil {
 		slog.Warn("webhook: failed to touch last_fired_at",
@@ -562,7 +582,7 @@ func (h *Handler) HandleAutopilotWebhook(w http.ResponseWriter, r *http.Request)
 		)
 	}
 
-	// 13. Persist the linkage delivery → run.
+	// 14. Persist the linkage delivery → run.
 	//
 	// The delivery row is always `dispatched` once we reach here: from the
 	// ingress's perspective we handed the payload off to the autopilot
@@ -591,6 +611,161 @@ func (h *Handler) HandleAutopilotWebhook(w http.ResponseWriter, r *http.Request)
 	h.finaliseDeliveryWithRun(r, delivery.ID, deliveryStatusDispatched, run.ID, http.StatusOK, respBody)
 
 	writeJSON(w, http.StatusOK, respBody)
+}
+
+// ── Description-declared event scope ────────────────────────────────────────
+
+type declaredWebhookEvent struct {
+	Name      string
+	Actions   map[string]struct{}
+	AnyAction bool
+}
+
+var declaredEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]*$`)
+
+// webhookEventAllowedByAutopilotScope returns false only when an autopilot
+// description declares a concrete "处理事件：" block and the incoming event is
+// outside that block. Descriptions without a parseable block preserve the
+// historical behavior and dispatch every valid webhook.
+func webhookEventAllowedByAutopilotScope(autopilot db.Autopilot, envelope WebhookEnvelope) bool {
+	if !autopilot.Description.Valid {
+		return true
+	}
+	rules := parseDeclaredWebhookEvents(autopilot.Description.String)
+	if len(rules) == 0 {
+		return true
+	}
+	_, eventName, eventAction := splitWebhookEvent(envelope.Event)
+	actionCandidates := webhookActionCandidates(eventAction, envelope.EventPayload)
+	for _, rule := range rules {
+		if rule.Name != eventName {
+			continue
+		}
+		if rule.AnyAction || len(rule.Actions) == 0 {
+			return true
+		}
+		for _, action := range actionCandidates {
+			if _, ok := rule.Actions[action]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func parseDeclaredWebhookEvents(description string) []declaredWebhookEvent {
+	lines := strings.Split(strings.ReplaceAll(description, "\r\n", "\n"), "\n")
+	rules := make([]declaredWebhookEvent, 0)
+	inEvents := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "处理事件") {
+			inEvents = true
+			continue
+		}
+		if !inEvents {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "动作") || strings.HasPrefix(trimmed, "输出") || strings.HasPrefix(trimmed, "<!--") {
+			break
+		}
+		trimmed = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(trimmed, "-"), "•"))
+		if trimmed == "" {
+			continue
+		}
+		if rule, ok := parseDeclaredWebhookEventLine(trimmed); ok {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+func parseDeclaredWebhookEventLine(line string) (declaredWebhookEvent, bool) {
+	namePart := line
+	actionPart := ""
+	if idx := strings.IndexAny(line, ":："); idx >= 0 {
+		namePart = line[:idx]
+		actionPart = line[idx+1:]
+	}
+	name := strings.TrimSpace(namePart)
+	if !declaredEventNamePattern.MatchString(name) {
+		return declaredWebhookEvent{}, false
+	}
+	_, normalizedName, impliedAction := splitWebhookEvent(name)
+	if normalizedName != "" {
+		name = normalizedName
+	}
+	if actionPart == "" {
+		actionPart = impliedAction
+	}
+	rule := declaredWebhookEvent{Name: name, AnyAction: true}
+	actions := parseDeclaredWebhookActions(actionPart)
+	if len(actions) > 0 {
+		rule.AnyAction = false
+		rule.Actions = actions
+	}
+	return rule, true
+}
+
+func parseDeclaredWebhookActions(actionPart string) map[string]struct{} {
+	actionPart = strings.TrimSpace(actionPart)
+	if actionPart == "" {
+		return nil
+	}
+	out := map[string]struct{}{}
+	for _, token := range strings.FieldsFunc(actionPart, func(r rune) bool {
+		return r == ',' || r == '，' || r == '/' || r == '、'
+	}) {
+		token = strings.TrimSpace(token)
+		if !declaredEventNamePattern.MatchString(token) {
+			continue
+		}
+		out[token] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func splitWebhookEvent(event string) (provider, name, action string) {
+	parts := strings.Split(event, ".")
+	if len(parts) >= 3 && parts[0] == "github" {
+		return parts[0], parts[1], strings.Join(parts[2:], ".")
+	}
+	if len(parts) >= 2 {
+		return "", parts[0], strings.Join(parts[1:], ".")
+	}
+	return "", event, ""
+}
+
+func webhookActionCandidates(eventAction string, payload json.RawMessage) []string {
+	seen := map[string]struct{}{}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		seen[v] = struct{}{}
+	}
+	add(eventAction)
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err == nil {
+		for _, key := range []string{"action", "state", "conclusion", "status"} {
+			if v, ok := obj[key].(string); ok {
+				add(v)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	return out
 }
 
 // ── Persistence helpers ─────────────────────────────────────────────────────

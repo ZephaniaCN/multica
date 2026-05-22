@@ -341,6 +341,59 @@ func TestWebhookHandler_GitHubHeaderInferredEvent(t *testing.T) {
 	}
 }
 
+func TestWebhookHandler_FiltersUndeclaredGitHubEventBeforeDispatch(t *testing.T) {
+	agentID := createWebhookTestAgent(t, "WebhookFilter Agent")
+	apID := createWebhookTestAutopilot(t, agentID, "active", "run_only")
+	trig := createWebhookTriggerViaHandler(t, apID)
+
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE autopilot
+		SET description = $2
+		WHERE id = $1
+	`, apID, `职责：GitHub CI / Checks 失败事件响应。
+
+处理事件：
+- workflow_run: completed
+- check_suite: completed
+
+动作：
+- 只处理终态事件。`); err != nil {
+		t.Fatalf("update autopilot description: %v", err)
+	}
+
+	w := postWebhook(t, *trig.WebhookToken, map[string]any{
+		"action": "in_progress",
+		"workflow_run": map[string]any{
+			"id": 123,
+		},
+	}, map[string]string{"X-GitHub-Event": "workflow_run"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["status"] != "ignored" || resp["reason"] != "event_filtered" {
+		t.Fatalf("expected ignored/event_filtered, got %#v body=%s", resp, w.Body.String())
+	}
+	if _, ok := resp["run_id"]; ok {
+		t.Fatalf("filtered response must not include run_id: %#v", resp)
+	}
+
+	runs, err := testHandler.Queries.ListAutopilotRuns(context.Background(), db.ListAutopilotRunsParams{
+		AutopilotID: parseUUID(apID),
+		Limit:       10,
+		Offset:      0,
+	})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("filtered webhook should not create runs, got %d", len(runs))
+	}
+}
+
 func TestWebhookHandler_RateLimitReturns429(t *testing.T) {
 	agentID := createWebhookTestAgent(t, "WebhookRate Agent")
 	apID := createWebhookTestAutopilot(t, agentID, "paused", "run_only") // paused → cheap ignored path
