@@ -222,23 +222,33 @@ func (s *AutopilotService) SyncRunFromIssue(ctx context.Context, issue db.Issue)
 		return
 	}
 
-	run, err := s.Queries.GetAutopilotRunByIssue(ctx, issue.ID)
-	if err != nil {
-		return // no active run linked to this issue
-	}
-
 	wsID := util.UUIDToString(issue.WorkspaceID)
 
 	switch issue.Status {
 	case "done", "in_review":
+		run, err := s.Queries.GetAutopilotRunByIssue(ctx, issue.ID)
+		if err != nil {
+			return // no run linked to this issue (any status)
+		}
+		prevStatus := run.Status
 		if _, err := s.Queries.UpdateAutopilotRunCompleted(ctx, db.UpdateAutopilotRunCompletedParams{
 			ID: run.ID,
 		}); err != nil {
 			slog.Warn("failed to complete autopilot run", "run_id", util.UUIDToString(run.ID), "error", err)
 			return
 		}
+		if prevStatus == "failed" || prevStatus == "skipped" {
+			slog.Info("autopilot run recovered from non-terminal status",
+				"run_id", util.UUIDToString(run.ID),
+				"previous_status", prevStatus,
+			)
+		}
 		s.publishRunDone(wsID, run, "completed")
 	case "cancelled", "blocked":
+		run, err := s.Queries.GetActiveAutopilotRunByIssue(ctx, issue.ID)
+		if err != nil {
+			return // no active run linked to this issue
+		}
 		reason := "issue " + issue.Status
 		if _, err := s.Queries.UpdateAutopilotRunFailed(ctx, db.UpdateAutopilotRunFailedParams{
 			ID:            run.ID,
