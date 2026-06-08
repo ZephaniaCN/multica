@@ -237,8 +237,8 @@ func (s *AutopilotService) SyncRunFromIssue(ctx context.Context, issue db.Issue)
 			slog.Warn("failed to complete autopilot run", "run_id", util.UUIDToString(run.ID), "error", err)
 			return
 		}
-		if prevStatus == "failed" || prevStatus == "skipped" {
-			slog.Info("autopilot run recovered from non-terminal status",
+		if prevStatus == "failed" {
+			slog.Info("autopilot run recovered from failed status",
 				"run_id", util.UUIDToString(run.ID),
 				"previous_status", prevStatus,
 			)

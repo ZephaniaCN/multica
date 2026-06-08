@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -121,7 +122,7 @@ func TestAutopilotRunOnlyTaskTerminalEventsUpdateRun(t *testing.T) {
 	}
 }
 
-// TestSyncRunFromIssueRecovery verifies that when a failed/skipped autopilot
+// TestSyncRunFromIssueRecovery verifies that when a failed autopilot
 // run's linked issue moves to done/in_review, the run is recovered to completed
 // with previous_failure_reason preserved and failure_reason cleared.
 func TestSyncRunFromIssueRecovery(t *testing.T) {
@@ -175,14 +176,14 @@ func TestSyncRunFromIssueRecovery(t *testing.T) {
 		}
 	})
 
-	t.Run("skipped-run-recovered-on-issue-done", func(t *testing.T) {
-		ap, issueID, runID := setupRecoveryTest(t, ctx, queries, autopilotSvc, agentID, "skipped", "")
+	t.Run("failed-run-recovered-on-issue-in-review", func(t *testing.T) {
+		ap, issueID, runID := setupRecoveryTest(t, ctx, queries, autopilotSvc, agentID, "failed", "timeout")
 		t.Cleanup(func() {
 			testPool.Exec(context.Background(), `DELETE FROM autopilot WHERE id = $1`, ap.ID)
 			testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
 		})
 
-		_, err := testPool.Exec(ctx, `UPDATE issue SET status = 'done' WHERE id = $1`, issueID)
+		_, err := testPool.Exec(ctx, `UPDATE issue SET status = 'in_review' WHERE id = $1`, issueID)
 		if err != nil {
 			t.Fatalf("update issue status: %v", err)
 		}
@@ -199,8 +200,11 @@ func TestSyncRunFromIssueRecovery(t *testing.T) {
 		if run.Status != "completed" {
 			t.Fatalf("expected run status 'completed', got %q", run.Status)
 		}
+		if !run.PreviousFailureReason.Valid || run.PreviousFailureReason.String != "timeout" {
+			t.Fatalf("expected previous_failure_reason 'timeout', got %v", run.PreviousFailureReason)
+		}
 		if run.FailureReason.Valid {
-			t.Fatalf("expected failure_reason to be cleared after recovery, got %q", run.FailureReason.String)
+			t.Fatalf("expected failure_reason to be cleared, got %q", run.FailureReason.String)
 		}
 	})
 
@@ -277,9 +281,11 @@ func TestSyncRunFromIssueRecovery(t *testing.T) {
 	})
 }
 
-// setupRecoveryTest creates an autopilot, dispatches it, creates a linked
-// issue, and manually sets the run to the given status. Returns the
-// autopilot entity, issue ID string, and run ID.
+// setupRecoveryTest creates an autopilot and a linked issue (with autopilot
+// origin), then manually sets the run to the given status. Uses
+// IncrementIssueCounter and CreateIssueWithOrigin to avoid
+// uq_issue_workspace_number collisions in CI. Returns the autopilot entity,
+// issue ID string, and run ID.
 func setupRecoveryTest(
 	t *testing.T,
 	ctx context.Context,
@@ -291,7 +297,15 @@ func setupRecoveryTest(
 ) (db.Autopilot, string, pgtype.UUID) {
 	t.Helper()
 
-	ap, err := queries.CreateAutopilot(ctx, db.CreateAutopilotParams{
+	tx, err := testPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := queries.WithTx(tx)
+
+	ap, err := qtx.CreateAutopilot(ctx, db.CreateAutopilotParams{
 		WorkspaceID:        parseUUID(testWorkspaceID),
 		Title:              "Recovery test autopilot " + t.Name(),
 		Description:        pgtype.Text{String: "Recovery regression test", Valid: true},
@@ -306,7 +320,37 @@ func setupRecoveryTest(
 		t.Fatalf("CreateAutopilot: %v", err)
 	}
 
-	// Create a run and link it to an issue
+	issueNumber, err := qtx.IncrementIssueCounter(ctx, ap.WorkspaceID)
+	if err != nil {
+		t.Fatalf("IncrementIssueCounter: %v", err)
+	}
+
+	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
+		WorkspaceID:   ap.WorkspaceID,
+		Title:         "recovery test issue",
+		Description:   pgtype.Text{},
+		Status:        "todo",
+		Priority:      "none",
+		AssigneeType:  pgtype.Text{String: "agent", Valid: true},
+		AssigneeID:    ap.AssigneeID,
+		CreatorType:   ap.CreatedByType,
+		CreatorID:     ap.CreatedByID,
+		ParentIssueID: pgtype.UUID{},
+		Position:      0,
+		DueDate:       pgtype.Timestamptz{},
+		Number:        issueNumber,
+		ProjectID:     pgtype.UUID{},
+		OriginType:    pgtype.Text{String: "autopilot", Valid: true},
+		OriginID:      ap.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssueWithOrigin: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
 	run, err := queries.CreateAutopilotRun(ctx, db.CreateAutopilotRunParams{
 		AutopilotID:    ap.ID,
 		Source:         "manual",
@@ -318,40 +362,23 @@ func setupRecoveryTest(
 		t.Fatalf("CreateAutopilotRun: %v", err)
 	}
 
-	// Create an issue with autopilot origin
-	var issueID string
-	err = testPool.QueryRow(ctx, `
-		INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, assignee_type, assignee_id, position, number, origin_type, origin_id)
-		VALUES ($1, 'recovery test issue', 'todo', 'none', 'member', $2, 'agent', $3, 0,
-		        (SELECT COALESCE(MAX(number), 0) + 1 FROM issue WHERE workspace_id = $1),
-		        'autopilot', $4)
-		RETURNING id::text
-	`, testWorkspaceID, testUserID, agentID, ap.ID).Scan(&issueID)
-	if err != nil {
-		t.Fatalf("insert autopilot issue: %v", err)
-	}
-
-	// Link run to issue
 	_, err = queries.UpdateAutopilotRunIssueCreated(ctx, db.UpdateAutopilotRunIssueCreatedParams{
 		ID:      run.ID,
-		IssueID: parseUUID(issueID),
+		IssueID: issue.ID,
 	})
 	if err != nil {
 		t.Fatalf("UpdateAutopilotRunIssueCreated: %v", err)
 	}
 
-	// Manually set the run to the desired terminal status
 	if runStatus == "failed" {
 		_, err = queries.UpdateAutopilotRunFailed(ctx, db.UpdateAutopilotRunFailedParams{
 			ID:            run.ID,
 			FailureReason: pgtype.Text{String: failureReason, Valid: true},
 		})
-	} else if runStatus == "skipped" {
-		_, err = testPool.Exec(ctx, `UPDATE autopilot_run SET status = 'skipped' WHERE id = $1`, run.ID)
-	}
-	if err != nil {
-		t.Fatalf("set run status to %s: %v", runStatus, err)
+		if err != nil {
+			t.Fatalf("UpdateAutopilotRunFailed: %v", err)
+		}
 	}
 
-	return ap, issueID, run.ID
+	return ap, util.UUIDToString(issue.ID), run.ID
 }

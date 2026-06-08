@@ -339,6 +339,7 @@ func (q *Queries) FailAutopilotRunsByIssue(ctx context.Context, issueID pgtype.U
 const getActiveAutopilotRunByIssue = `-- name: GetActiveAutopilotRunByIssue :one
 SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason FROM autopilot_run
 WHERE issue_id = $1 AND status IN ('issue_created', 'running')
+ORDER BY created_at DESC, id DESC
 LIMIT 1
 `
 
@@ -451,7 +452,7 @@ func (q *Queries) GetAutopilotRun(ctx context.Context, id pgtype.UUID) (Autopilo
 const getAutopilotRunByIssue = `-- name: GetAutopilotRunByIssue :one
 
 SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason FROM autopilot_run
-WHERE issue_id = $1 AND status IN ('issue_created', 'running', 'failed', 'skipped')
+WHERE issue_id = $1 AND status IN ('issue_created', 'running', 'failed')
 ORDER BY created_at DESC, id DESC
 LIMIT 1
 `

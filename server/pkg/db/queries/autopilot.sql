@@ -169,13 +169,14 @@ RETURNING *;
 
 -- name: GetAutopilotRunByIssue :one
 SELECT * FROM autopilot_run
-WHERE issue_id = $1 AND status IN ('issue_created', 'running', 'failed', 'skipped')
+WHERE issue_id = $1 AND status IN ('issue_created', 'running', 'failed')
 ORDER BY created_at DESC, id DESC
 LIMIT 1;
 
 -- name: GetActiveAutopilotRunByIssue :one
 SELECT * FROM autopilot_run
 WHERE issue_id = $1 AND status IN ('issue_created', 'running')
+ORDER BY created_at DESC, id DESC
 LIMIT 1;
 
 -- name: FailAutopilotRunsByIssue :exec
