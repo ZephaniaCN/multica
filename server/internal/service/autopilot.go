@@ -349,32 +349,27 @@ func (s *AutopilotService) getIssuePrefix(workspaceID pgtype.UUID) string {
 // Stream Disconnect Reconciliation
 // =============================================================================
 
-// streamDisconnectedPatterns are error texts from the agent harness that
-// indicate a run-terminating stream disconnect.
-var streamDisconnectedPatterns = []string{
-	"stream disconnected before completion",
-	"error sending request for url",
-}
-
-// matchStreamDisconnected checks whether a system comment content matches
-// a known stream-disconnected pattern.
+// matchStreamDisconnected checks whether a comment content matches the
+// specific stream-disconnected terminal failure signature from the agent
+// harness. The matching requires BOTH the "stream disconnected" marker and
+// the "codex/responses" endpoint URL to avoid misclassifying generic
+// network errors as terminal stream disconnects.
 func matchStreamDisconnected(content string) bool {
 	lower := strings.ToLower(content)
-	for _, pat := range streamDisconnectedPatterns {
-		if strings.Contains(lower, pat) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(lower, "stream disconnected before completion") &&
+		strings.Contains(lower, "codex/responses")
 }
 
 // HandleStreamDisconnectedComment checks whether a newly created system
 // comment on an issue signals a terminal stream disconnect for the linked
 // autopilot run, and if so fails the run and creates a compensation retry.
 //
+// The commentType parameter is the comment's Type field ("system" for task
+// failure comments), not the author_type (which is "agent" for system comments).
+//
 // Returns the run (if any) that was failed, or nil.
-func (s *AutopilotService) HandleStreamDisconnectedComment(ctx context.Context, issueID pgtype.UUID, commentContent, commentAuthorType string) (*db.AutopilotRun, error) {
-	if commentAuthorType != "system" {
+func (s *AutopilotService) HandleStreamDisconnectedComment(ctx context.Context, issueID pgtype.UUID, commentContent, commentType string) (*db.AutopilotRun, error) {
+	if commentType != "system" {
 		return nil, nil
 	}
 	if !matchStreamDisconnected(commentContent) {
@@ -391,6 +386,14 @@ func (s *AutopilotService) HandleStreamDisconnectedComment(ctx context.Context, 
 
 	run := runs[0]
 	if run.Status != "issue_created" && run.Status != "running" {
+		return nil, nil
+	}
+
+	if run.IsCompensation || run.RetryOf.Valid {
+		slog.Info("stream disconnect: refusing to retry a compensation run",
+			"run_id", util.UUIDToString(run.ID),
+			"issue_id", util.UUIDToString(issueID),
+		)
 		return nil, nil
 	}
 
@@ -426,9 +429,18 @@ func (s *AutopilotService) HandleStreamDisconnectedComment(ctx context.Context, 
 }
 
 // CreateCompensationRun creates exactly one compensation retry for a
-// stream_disconnected terminal failure. The retry is deduped by
-// checking if a compensation run already exists for the original run.
+// stream_disconnected terminal failure. The retry is deduped by a
+// DB-level unique constraint on compensation_key, with an application-level
+// existence check as a fast path. Compensation runs themselves are not
+// retried to avoid recursive cascades.
 func (s *AutopilotService) CreateCompensationRun(ctx context.Context, autopilot db.Autopilot, originalRun db.AutopilotRun) error {
+	if originalRun.IsCompensation || originalRun.RetryOf.Valid {
+		slog.Info("refusing to create compensation retry for a compensation run",
+			"run_id", util.UUIDToString(originalRun.ID),
+		)
+		return nil
+	}
+
 	alreadyExists, err := s.Queries.CheckCompensationRetryExists(ctx, originalRun.ID)
 	if err != nil {
 		return fmt.Errorf("check existing retry: %w", err)
@@ -438,6 +450,20 @@ func (s *AutopilotService) CreateCompensationRun(ctx context.Context, autopilot 
 			"original_run_id", util.UUIDToString(originalRun.ID),
 		)
 		return nil
+	}
+
+	// Pre-retry guard: inspect the linked issue for partial work before
+	// dispatching. If any meaningful agent comment (non-system) exists, or
+	// the issue has been manually moved to a terminal status, skip the retry.
+	if originalRun.IssueID.Valid {
+		if skip, reason := s.shouldSkipCompensationRetry(ctx, originalRun.IssueID); skip {
+			slog.Info("skipping compensation retry: partial work detected",
+				"run_id", util.UUIDToString(originalRun.ID),
+				"issue_id", util.UUIDToString(originalRun.IssueID),
+				"reason", reason,
+			)
+			return nil
+		}
 	}
 
 	compensationKey := fmt.Sprintf("stream_disconnected:%s", util.UUIDToString(originalRun.ID))
@@ -453,7 +479,6 @@ func (s *AutopilotService) CreateCompensationRun(ctx context.Context, autopilot 
 	}
 
 	wsID := util.UUIDToString(autopilot.WorkspaceID)
-	s.publishRunDone(wsID, originalRun, "failed")
 
 	slog.Info("compensation retry run created",
 		"compensation_run_id", util.UUIDToString(compRun.ID),
@@ -474,16 +499,51 @@ func (s *AutopilotService) CreateCompensationRun(ctx context.Context, autopilot 
 		WorkspaceID: wsID,
 		ActorType:   "system",
 		Payload: map[string]any{
-			"run_id":            util.UUIDToString(compRun.ID),
-			"autopilot_id":      util.UUIDToString(autopilot.ID),
-			"source":            "compensation_retry",
-			"status":            compRun.Status,
-			"retry_of":          util.UUIDToString(originalRun.ID),
-			"is_compensation":   true,
+			"run_id":          util.UUIDToString(compRun.ID),
+			"autopilot_id":    util.UUIDToString(autopilot.ID),
+			"source":          "compensation_retry",
+			"status":          compRun.Status,
+			"retry_of":        util.UUIDToString(originalRun.ID),
+			"is_compensation": true,
 		},
 	})
 
 	return nil
+}
+
+// shouldSkipCompensationRetry inspects the linked issue to decide whether
+// a compensation retry should be skipped because the failed run produced
+// partial work. Returns (skip, reason).
+func (s *AutopilotService) shouldSkipCompensationRetry(ctx context.Context, issueID pgtype.UUID) (bool, string) {
+	issue, err := s.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		return true, "failed to load issue"
+	}
+
+	if issue.Status == "done" || issue.Status == "cancelled" || issue.Status == "blocked" {
+		return true, "issue already in terminal status: " + issue.Status
+	}
+
+	comments, err := s.Queries.ListComments(ctx, db.ListCommentsParams{
+		IssueID:     issueID,
+		WorkspaceID: issue.WorkspaceID,
+	})
+	if err != nil {
+		return true, "failed to load comments"
+	}
+
+	agentCommentCount := 0
+	for _, c := range comments {
+		if c.Type != "system" {
+			agentCommentCount++
+		}
+	}
+
+	if agentCommentCount > 0 {
+		return true, fmt.Sprintf("issue has %d non-system comments, indicating partial work", agentCommentCount)
+	}
+
+	return false, ""
 }
 
 // ReconcileStuckRuns scans for create_issue autopilot runs that have been
@@ -506,6 +566,10 @@ func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshol
 
 	for _, run := range runs {
 		if !run.IssueID.Valid {
+			continue
+		}
+
+		if run.IsCompensation || run.RetryOf.Valid {
 			continue
 		}
 
@@ -536,7 +600,7 @@ func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshol
 
 		disconnected := false
 		for _, c := range comments {
-			if c.AuthorType == "system" && matchStreamDisconnected(c.Content) {
+			if c.Type == "system" && matchStreamDisconnected(c.Content) {
 				disconnected = true
 				break
 			}
