@@ -7,6 +7,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -72,4 +73,45 @@ func syncRunFromTaskEvent(ctx context.Context, svc *service.AutopilotService, e 
 		return
 	}
 	svc.SyncRunFromTask(ctx, task)
+}
+
+// registerStreamDisconnectListener hooks into comment:created events to
+// detect terminal stream_disconnected system comments and trigger run
+// failure sync + compensation retry.
+func registerStreamDisconnectListener(bus *events.Bus, svc *service.AutopilotService) {
+	ctx := context.Background()
+
+	bus.Subscribe(protocol.EventCommentCreated, func(e events.Event) {
+		payload, ok := e.Payload.(map[string]any)
+		if !ok {
+			return
+		}
+		comment, ok := payload["comment"].(handler.CommentResponse)
+		if !ok {
+			return
+		}
+		if comment.AuthorType != "system" {
+			return
+		}
+
+		issueID := parseUUID(comment.IssueID)
+		if !issueID.Valid {
+			return
+		}
+
+		run, err := svc.HandleStreamDisconnectedComment(ctx, issueID, comment.Content, comment.AuthorType)
+		if err != nil {
+			slog.Warn("stream disconnect listener: handle failed",
+				"issue_id", comment.IssueID,
+				"error", err,
+			)
+			return
+		}
+		if run != nil {
+			slog.Info("stream disconnect listener: run failed",
+				"run_id", util.UUIDToString(run.ID),
+				"issue_id", comment.IssueID,
+			)
+		}
+	})
 }

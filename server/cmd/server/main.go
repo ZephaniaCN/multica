@@ -109,10 +109,12 @@ func main() {
 	taskSvc := service.NewTaskService(queries, pool, hub, bus)
 	autopilotSvc := service.NewAutopilotService(queries, pool, bus, taskSvc)
 	registerAutopilotListeners(bus, autopilotSvc)
+	registerStreamDisconnectListener(bus, autopilotSvc)
 
 	// Start background sweeper to mark stale runtimes as offline.
 	go runRuntimeSweeper(sweepCtx, queries, taskSvc, bus)
 	go runAutopilotScheduler(autopilotCtx, queries, autopilotSvc)
+	go runStreamDisconnectReconciler(autopilotCtx, autopilotSvc)
 	go runDBStatsLogger(sweepCtx, pool)
 
 	// Graceful shutdown
