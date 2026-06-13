@@ -214,3 +214,29 @@ func TestSystemCommentShape_DocumentsAuthorTypeVsType(t *testing.T) {
 		t.Error("should reject when commentType == 'agent' (author_type, not type)")
 	}
 }
+
+func TestCompensationRunFailsOnStreamDisconnect(t *testing.T) {
+	bus := events.New()
+	autopilotID := testStreamUUID(3)
+	workspaceID := testStreamUUID(5)
+
+	compRun := db.AutopilotRun{
+		ID:             testStreamUUID(1),
+		AutopilotID:    autopilotID,
+		Status:         "failed",
+		IsCompensation: true,
+		RetryOf:        testStreamUUID(4),
+	}
+
+	autopilot := db.Autopilot{
+		ID:          autopilotID,
+		WorkspaceID: workspaceID,
+	}
+
+	svc := &AutopilotService{Queries: db.New(&noOpDB{}), Bus: bus}
+
+	err := svc.CreateCompensationRun(context.Background(), autopilot, compRun)
+	if err != nil {
+		t.Fatalf("CreateCompensationRun should not error on compensation run: %v", err)
+	}
+}

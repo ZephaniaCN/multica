@@ -389,14 +389,6 @@ func (s *AutopilotService) HandleStreamDisconnectedComment(ctx context.Context, 
 		return nil, nil
 	}
 
-	if run.IsCompensation || run.RetryOf.Valid {
-		slog.Info("stream disconnect: refusing to retry a compensation run",
-			"run_id", util.UUIDToString(run.ID),
-			"issue_id", util.UUIDToString(issueID),
-		)
-		return nil, nil
-	}
-
 	autopilot, err := s.Queries.GetAutopilot(ctx, run.AutopilotID)
 	if err != nil {
 		return nil, fmt.Errorf("load autopilot: %w", err)
@@ -566,10 +558,6 @@ func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshol
 
 	for _, run := range runs {
 		if !run.IssueID.Valid {
-			continue
-		}
-
-		if run.IsCompensation || run.RetryOf.Valid {
 			continue
 		}
 
