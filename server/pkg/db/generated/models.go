@@ -123,22 +123,23 @@ type Autopilot struct {
 }
 
 type AutopilotRun struct {
-	ID              pgtype.UUID        `json:"id"`
-	AutopilotID     pgtype.UUID        `json:"autopilot_id"`
-	TriggerID       pgtype.UUID        `json:"trigger_id"`
-	Source          string             `json:"source"`
-	Status          string             `json:"status"`
-	IssueID         pgtype.UUID        `json:"issue_id"`
-	TaskID          pgtype.UUID        `json:"task_id"`
-	TriggeredAt     pgtype.Timestamptz `json:"triggered_at"`
-	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
-	FailureReason   pgtype.Text        `json:"failure_reason"`
-	TriggerPayload  []byte             `json:"trigger_payload"`
-	Result          []byte             `json:"result"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	IsCompensation  bool               `json:"is_compensation"`
-	RetryOf         pgtype.UUID        `json:"retry_of"`
-	CompensationKey pgtype.Text        `json:"compensation_key"`
+	ID                    pgtype.UUID        `json:"id"`
+	AutopilotID           pgtype.UUID        `json:"autopilot_id"`
+	TriggerID             pgtype.UUID        `json:"trigger_id"`
+	Source                string             `json:"source"`
+	Status                string             `json:"status"`
+	IssueID               pgtype.UUID        `json:"issue_id"`
+	TaskID                pgtype.UUID        `json:"task_id"`
+	TriggeredAt           pgtype.Timestamptz `json:"triggered_at"`
+	CompletedAt           pgtype.Timestamptz `json:"completed_at"`
+	FailureReason         pgtype.Text        `json:"failure_reason"`
+	TriggerPayload        []byte             `json:"trigger_payload"`
+	Result                []byte             `json:"result"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	PreviousFailureReason pgtype.Text        `json:"previous_failure_reason"`
+	IsCompensation        bool               `json:"is_compensation"`
+	RetryOf               pgtype.UUID        `json:"retry_of"`
+	CompensationKey       pgtype.Text        `json:"compensation_key"`
 }
 
 type AutopilotTrigger struct {
