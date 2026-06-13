@@ -34,10 +34,11 @@ func runStreamDisconnectReconciler(ctx context.Context, svc *service.AutopilotSe
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			reconciled, failed := svc.ReconcileStuckRuns(ctx, stuckRunThreshold, maxStuckRunsPerCycle)
-			if reconciled > 0 || failed > 0 {
+			reconciled, retryFailed, failed := svc.ReconcileStuckRuns(ctx, stuckRunThreshold, maxStuckRunsPerCycle)
+			if reconciled > 0 || retryFailed > 0 || failed > 0 {
 				slog.Info("stream disconnect reconciler: cycle complete",
 					"reconciled", reconciled,
+					"retry_failed", retryFailed,
 					"failed", failed,
 				)
 			}

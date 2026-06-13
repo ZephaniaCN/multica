@@ -66,6 +66,9 @@ type AutopilotRunResponse struct {
 	TriggerPayload any     `json:"trigger_payload"`
 	Result         any     `json:"result"`
 	CreatedAt      string  `json:"created_at"`
+	IsCompensation bool    `json:"is_compensation"`
+	RetryOf        *string `json:"retry_of"`
+	CompensationKey *string `json:"compensation_key"`
 }
 
 // ── Converters ──────────────────────────────────────────────────────────────
@@ -128,6 +131,9 @@ func runToResponse(r db.AutopilotRun) AutopilotRunResponse {
 		TriggerPayload: payload,
 		Result:         result,
 		CreatedAt:      timestampToString(r.CreatedAt),
+		IsCompensation: r.IsCompensation,
+		RetryOf:        uuidToPtr(r.RetryOf),
+		CompensationKey: textToPtr(r.CompensationKey),
 	}
 }
 

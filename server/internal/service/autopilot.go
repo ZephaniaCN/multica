@@ -522,7 +522,7 @@ func (s *AutopilotService) shouldSkipCompensationRetry(ctx context.Context, issu
 		return true, "failed to load issue"
 	}
 
-	if issue.Status == "done" || issue.Status == "cancelled" || issue.Status == "blocked" {
+	if issue.Status == "done" || issue.Status == "cancelled" || issue.Status == "blocked" || issue.Status == "in_review" {
 		return true, "issue already in terminal status: " + issue.Status
 	}
 
@@ -556,14 +556,14 @@ func (s *AutopilotService) shouldSkipCompensationRetry(ctx context.Context, issu
 // This is the background safety net for cases where the event-driven path
 // (HandleStreamDisconnectedComment) was missed due to a restart or transient
 // failure.
-func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshold time.Duration, limit int32) (reconciled int, failed int) {
+func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshold time.Duration, limit int32) (reconciled int, retryFailed int, failed int) {
 	runs, err := s.Queries.ListStuckIssueCreatedRuns(ctx, db.ListStuckIssueCreatedRunsParams{
 		StuckInterval: pgtype.Interval{Microseconds: stuckThreshold.Microseconds(), Valid: true},
 		Limit:          limit,
 	})
 	if err != nil {
 		slog.Warn("stream disconnect reconciler: failed to list stuck runs", "error", err)
-		return 0, 0
+		return 0, 0, 0
 	}
 
 	for _, run := range runs {
@@ -583,7 +583,7 @@ func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshol
 			continue
 		}
 
-		if issue.Status == "blocked" || issue.Status == "done" || issue.Status == "cancelled" {
+		if issue.Status == "blocked" || issue.Status == "done" || issue.Status == "cancelled" || issue.Status == "in_review" {
 			continue
 		}
 
@@ -626,6 +626,7 @@ func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshol
 		s.publishRunDone(wsID, run, "failed")
 
 		if err := s.CreateCompensationRun(ctx, autopilot, run); err != nil {
+			retryFailed++
 			slog.Warn("stream disconnect reconciler: compensation retry failed",
 				"run_id", util.UUIDToString(run.ID),
 				"error", err,
@@ -635,5 +636,5 @@ func (s *AutopilotService) ReconcileStuckRuns(ctx context.Context, stuckThreshol
 		reconciled++
 	}
 
-	return reconciled, failed
+	return reconciled, retryFailed, failed
 }
