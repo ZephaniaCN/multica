@@ -203,3 +203,44 @@ WHERE t.kind = 'schedule'
   AND t.next_run_at IS NULL
   AND t.cron_expression IS NOT NULL
   AND a.status = 'active';
+
+-- =====================
+-- Stream Disconnect Reconciliation
+-- =====================
+
+-- name: ListStuckIssueCreatedRuns :many
+-- Finds create_issue autopilot runs stuck in issue_created for longer than
+-- the given interval. Used by the reconciliation worker to detect runs that
+-- may have suffered a stream disconnect.
+SELECT r.*
+FROM autopilot_run r
+JOIN autopilot a ON r.autopilot_id = a.id
+WHERE r.status = 'issue_created'
+  AND a.execution_mode = 'create_issue'
+  AND a.status = 'active'
+  AND r.triggered_at < now() - sqlc.arg('stuck_interval')::interval
+ORDER BY r.triggered_at ASC
+LIMIT sqlc.arg('limit');
+
+-- name: CheckCompensationRetryExists :one
+-- Returns true if a compensation retry already exists for the given original run.
+SELECT EXISTS(
+    SELECT 1 FROM autopilot_run
+    WHERE retry_of = $1 AND is_compensation = true
+) AS exists;
+
+-- name: CreateCompensationRun :one
+-- Creates a compensation retry run for a stream_disconnected terminal failure.
+INSERT INTO autopilot_run (
+    autopilot_id, trigger_id, source, status, is_compensation, retry_of, compensation_key
+) VALUES (
+    $1, $2, 'manual', 'issue_created', true, $3, $4
+) RETURNING *;
+
+-- name: GetAutopilotRunByIssueAndStatus :many
+-- Returns active runs linked to an issue — used to detect if a run
+-- should be failed due to stream_disconnected.
+SELECT * FROM autopilot_run
+WHERE issue_id = $1
+  AND status IN ('issue_created', 'running')
+ORDER BY created_at DESC;

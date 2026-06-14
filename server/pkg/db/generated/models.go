@@ -137,6 +137,9 @@ type AutopilotRun struct {
 	Result                []byte             `json:"result"`
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	PreviousFailureReason pgtype.Text        `json:"previous_failure_reason"`
+	IsCompensation        bool               `json:"is_compensation"`
+	RetryOf               pgtype.UUID        `json:"retry_of"`
+	CompensationKey       pgtype.Text        `json:"compensation_key"`
 }
 
 type AutopilotTrigger struct {

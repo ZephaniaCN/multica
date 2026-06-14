@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -72,4 +74,92 @@ func syncRunFromTaskEvent(ctx context.Context, svc *service.AutopilotService, e 
 		return
 	}
 	svc.SyncRunFromTask(ctx, task)
+}
+
+// registerStreamDisconnectListener hooks into comment:created events to
+// detect terminal stream_disconnected system comments and trigger run
+// failure sync + compensation retry.
+//
+// Comment events come from two sources with different payload shapes:
+//   - handler path: payload["comment"] = handler.CommentResponse
+//   - task failure path: payload["comment"] = map[string]any
+//
+// We accept both shapes and extract the fields we need.
+func registerStreamDisconnectListener(bus *events.Bus, svc *service.AutopilotService) {
+	ctx := context.Background()
+
+	bus.Subscribe(protocol.EventCommentCreated, func(e events.Event) {
+		payload, ok := e.Payload.(map[string]any)
+		if !ok {
+			return
+		}
+
+		rawComment, ok := payload["comment"]
+		if !ok {
+			return
+		}
+
+		var (
+			issueID     pgtype.UUID
+			content     string
+			commentType string
+			ok1, ok2    bool
+		)
+
+		if cr, ok := rawComment.(handler.CommentResponse); ok {
+			issueID = parseUUID(cr.IssueID)
+			content = cr.Content
+			commentType = cr.Type
+			ok1, ok2 = true, true
+		} else if cm, ok := rawComment.(map[string]any); ok {
+			issueID, ok1 = parseUUIDFromMap(cm, "issue_id")
+			content, ok2 = stringFromMap(cm, "content")
+			commentType, _ = stringFromMap(cm, "type")
+		} else {
+			return
+		}
+
+		if !ok1 || !ok2 || content == "" {
+			return
+		}
+		if !issueID.Valid {
+			return
+		}
+
+		run, err := svc.HandleStreamDisconnectedComment(ctx, issueID, content, commentType)
+		if err != nil {
+			slog.Warn("stream disconnect listener: handle failed",
+				"issue_id", util.UUIDToString(issueID),
+				"error", err,
+			)
+			return
+		}
+		if run != nil {
+			slog.Info("stream disconnect listener: run failed",
+				"run_id", util.UUIDToString(run.ID),
+				"issue_id", util.UUIDToString(issueID),
+			)
+		}
+	})
+}
+
+func parseUUIDFromMap(m map[string]any, key string) (pgtype.UUID, bool) {
+	v, ok := m[key]
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	s, ok := v.(string)
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	return parseUUID(s), true
+}
+
+func stringFromMap(m map[string]any, key string) (string, bool) {
+	v, ok := m[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
 }

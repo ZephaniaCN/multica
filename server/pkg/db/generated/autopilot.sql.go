@@ -29,6 +29,21 @@ func (q *Queries) AdvanceTriggerNextRun(ctx context.Context, arg AdvanceTriggerN
 	return err
 }
 
+const checkCompensationRetryExists = `-- name: CheckCompensationRetryExists :one
+SELECT EXISTS(
+    SELECT 1 FROM autopilot_run
+    WHERE retry_of = $1 AND is_compensation = true
+) AS exists
+`
+
+// Returns true if a compensation retry already exists for the given original run.
+func (q *Queries) CheckCompensationRetryExists(ctx context.Context, retryOf pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, checkCompensationRetryExists, retryOf)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const claimDueScheduleTriggers = `-- name: ClaimDueScheduleTriggers :many
 
 UPDATE autopilot_trigger t
@@ -159,7 +174,7 @@ INSERT INTO autopilot_run (
     autopilot_id, trigger_id, source, status, trigger_payload
 ) VALUES (
     $1, $4, $2, $3, $5
-) RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason
+) RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key
 `
 
 type CreateAutopilotRunParams struct {
@@ -197,6 +212,9 @@ func (q *Queries) CreateAutopilotRun(ctx context.Context, arg CreateAutopilotRun
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
@@ -304,6 +322,52 @@ func (q *Queries) CreateAutopilotTrigger(ctx context.Context, arg CreateAutopilo
 	return i, err
 }
 
+const createCompensationRun = `-- name: CreateCompensationRun :one
+INSERT INTO autopilot_run (
+    autopilot_id, trigger_id, source, status, is_compensation, retry_of, compensation_key
+) VALUES (
+    $1, $2, 'manual', 'issue_created', true, $3, $4
+) RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key
+`
+
+type CreateCompensationRunParams struct {
+	AutopilotID     pgtype.UUID `json:"autopilot_id"`
+	TriggerID       pgtype.UUID `json:"trigger_id"`
+	RetryOf         pgtype.UUID `json:"retry_of"`
+	CompensationKey pgtype.Text `json:"compensation_key"`
+}
+
+// Creates a compensation retry run for a stream_disconnected terminal failure.
+func (q *Queries) CreateCompensationRun(ctx context.Context, arg CreateCompensationRunParams) (AutopilotRun, error) {
+	row := q.db.QueryRow(ctx, createCompensationRun,
+		arg.AutopilotID,
+		arg.TriggerID,
+		arg.RetryOf,
+		arg.CompensationKey,
+	)
+	var i AutopilotRun
+	err := row.Scan(
+		&i.ID,
+		&i.AutopilotID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.IssueID,
+		&i.TaskID,
+		&i.TriggeredAt,
+		&i.CompletedAt,
+		&i.FailureReason,
+		&i.TriggerPayload,
+		&i.Result,
+		&i.CreatedAt,
+		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
+	)
+	return i, err
+}
+
 const deleteAutopilot = `-- name: DeleteAutopilot :exec
 DELETE FROM autopilot WHERE id = $1
 `
@@ -337,7 +401,7 @@ func (q *Queries) FailAutopilotRunsByIssue(ctx context.Context, issueID pgtype.U
 }
 
 const getActiveAutopilotRunByIssue = `-- name: GetActiveAutopilotRunByIssue :one
-SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason FROM autopilot_run
+SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key FROM autopilot_run
 WHERE issue_id = $1 AND status IN ('issue_created', 'running')
 ORDER BY created_at DESC, id DESC
 LIMIT 1
@@ -361,6 +425,9 @@ func (q *Queries) GetActiveAutopilotRunByIssue(ctx context.Context, issueID pgty
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
@@ -423,7 +490,7 @@ func (q *Queries) GetAutopilotInWorkspace(ctx context.Context, arg GetAutopilotI
 }
 
 const getAutopilotRun = `-- name: GetAutopilotRun :one
-SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason FROM autopilot_run
+SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key FROM autopilot_run
 WHERE id = $1
 `
 
@@ -445,13 +512,16 @@ func (q *Queries) GetAutopilotRun(ctx context.Context, id pgtype.UUID) (Autopilo
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
 
 const getAutopilotRunByIssue = `-- name: GetAutopilotRunByIssue :one
 
-SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason FROM autopilot_run
+SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key FROM autopilot_run
 WHERE issue_id = $1 AND status IN ('issue_created', 'running', 'failed')
 ORDER BY created_at DESC, id DESC
 LIMIT 1
@@ -478,8 +548,58 @@ func (q *Queries) GetAutopilotRunByIssue(ctx context.Context, issueID pgtype.UUI
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
+}
+
+const getAutopilotRunByIssueAndStatus = `-- name: GetAutopilotRunByIssueAndStatus :many
+SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key FROM autopilot_run
+WHERE issue_id = $1
+  AND status IN ('issue_created', 'running')
+ORDER BY created_at DESC
+`
+
+// Returns active runs linked to an issue — used to detect if a run
+// should be failed due to stream_disconnected.
+func (q *Queries) GetAutopilotRunByIssueAndStatus(ctx context.Context, issueID pgtype.UUID) ([]AutopilotRun, error) {
+	rows, err := q.db.Query(ctx, getAutopilotRunByIssueAndStatus, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AutopilotRun{}
+	for rows.Next() {
+		var i AutopilotRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.AutopilotID,
+			&i.TriggerID,
+			&i.Source,
+			&i.Status,
+			&i.IssueID,
+			&i.TaskID,
+			&i.TriggeredAt,
+			&i.CompletedAt,
+			&i.FailureReason,
+			&i.TriggerPayload,
+			&i.Result,
+			&i.CreatedAt,
+			&i.PreviousFailureReason,
+			&i.IsCompensation,
+			&i.RetryOf,
+			&i.CompensationKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getAutopilotTrigger = `-- name: GetAutopilotTrigger :one
@@ -508,7 +628,7 @@ func (q *Queries) GetAutopilotTrigger(ctx context.Context, id pgtype.UUID) (Auto
 }
 
 const listAutopilotRuns = `-- name: ListAutopilotRuns :many
-SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason FROM autopilot_run
+SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key FROM autopilot_run
 WHERE autopilot_id = $1
 ORDER BY created_at DESC
 LIMIT $2 OFFSET $3
@@ -544,6 +664,9 @@ func (q *Queries) ListAutopilotRuns(ctx context.Context, arg ListAutopilotRunsPa
 			&i.Result,
 			&i.CreatedAt,
 			&i.PreviousFailureReason,
+			&i.IsCompensation,
+			&i.RetryOf,
+			&i.CompensationKey,
 		); err != nil {
 			return nil, err
 		}
@@ -637,6 +760,68 @@ func (q *Queries) ListAutopilots(ctx context.Context, arg ListAutopilotsParams) 
 			&i.LastRunAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStuckIssueCreatedRuns = `-- name: ListStuckIssueCreatedRuns :many
+
+SELECT r.id, r.autopilot_id, r.trigger_id, r.source, r.status, r.issue_id, r.task_id, r.triggered_at, r.completed_at, r.failure_reason, r.trigger_payload, r.result, r.created_at, r.previous_failure_reason, r.is_compensation, r.retry_of, r.compensation_key
+FROM autopilot_run r
+JOIN autopilot a ON r.autopilot_id = a.id
+WHERE r.status = 'issue_created'
+  AND a.execution_mode = 'create_issue'
+  AND a.status = 'active'
+  AND r.triggered_at < now() - $1::interval
+ORDER BY r.triggered_at ASC
+LIMIT $2
+`
+
+type ListStuckIssueCreatedRunsParams struct {
+	StuckInterval pgtype.Interval `json:"stuck_interval"`
+	Limit         int32           `json:"limit"`
+}
+
+// =====================
+// Stream Disconnect Reconciliation
+// =====================
+// Finds create_issue autopilot runs stuck in issue_created for longer than
+// the given interval. Used by the reconciliation worker to detect runs that
+// may have suffered a stream disconnect.
+func (q *Queries) ListStuckIssueCreatedRuns(ctx context.Context, arg ListStuckIssueCreatedRunsParams) ([]AutopilotRun, error) {
+	rows, err := q.db.Query(ctx, listStuckIssueCreatedRuns, arg.StuckInterval, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AutopilotRun{}
+	for rows.Next() {
+		var i AutopilotRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.AutopilotID,
+			&i.TriggerID,
+			&i.Source,
+			&i.Status,
+			&i.IssueID,
+			&i.TaskID,
+			&i.TriggeredAt,
+			&i.CompletedAt,
+			&i.FailureReason,
+			&i.TriggerPayload,
+			&i.Result,
+			&i.CreatedAt,
+			&i.PreviousFailureReason,
+			&i.IsCompensation,
+			&i.RetryOf,
+			&i.CompensationKey,
 		); err != nil {
 			return nil, err
 		}
@@ -784,7 +969,7 @@ SET status = 'completed', completed_at = now(), result = $2,
     previous_failure_reason = COALESCE(previous_failure_reason, failure_reason),
     failure_reason = NULL
 WHERE id = $1
-RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason
+RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key
 `
 
 type UpdateAutopilotRunCompletedParams struct {
@@ -810,6 +995,9 @@ func (q *Queries) UpdateAutopilotRunCompleted(ctx context.Context, arg UpdateAut
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
@@ -818,7 +1006,7 @@ const updateAutopilotRunFailed = `-- name: UpdateAutopilotRunFailed :one
 UPDATE autopilot_run
 SET status = 'failed', completed_at = now(), failure_reason = $2
 WHERE id = $1
-RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason
+RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key
 `
 
 type UpdateAutopilotRunFailedParams struct {
@@ -844,6 +1032,9 @@ func (q *Queries) UpdateAutopilotRunFailed(ctx context.Context, arg UpdateAutopi
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
@@ -852,7 +1043,7 @@ const updateAutopilotRunIssueCreated = `-- name: UpdateAutopilotRunIssueCreated 
 UPDATE autopilot_run
 SET status = 'issue_created', issue_id = $2
 WHERE id = $1
-RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason
+RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key
 `
 
 type UpdateAutopilotRunIssueCreatedParams struct {
@@ -878,6 +1069,9 @@ func (q *Queries) UpdateAutopilotRunIssueCreated(ctx context.Context, arg Update
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
@@ -886,7 +1080,7 @@ const updateAutopilotRunRunning = `-- name: UpdateAutopilotRunRunning :one
 UPDATE autopilot_run
 SET status = 'running', task_id = $2
 WHERE id = $1
-RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason
+RETURNING id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, previous_failure_reason, is_compensation, retry_of, compensation_key
 `
 
 type UpdateAutopilotRunRunningParams struct {
@@ -912,6 +1106,9 @@ func (q *Queries) UpdateAutopilotRunRunning(ctx context.Context, arg UpdateAutop
 		&i.Result,
 		&i.CreatedAt,
 		&i.PreviousFailureReason,
+		&i.IsCompensation,
+		&i.RetryOf,
+		&i.CompensationKey,
 	)
 	return i, err
 }
