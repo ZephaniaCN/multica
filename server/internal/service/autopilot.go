@@ -399,6 +399,19 @@ func (s *AutopilotService) HandleStreamDisconnectedComment(ctx context.Context, 
 		return nil, nil
 	}
 
+	issue, err := s.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("load issue: %w", err)
+	}
+	if issue.Status == "done" || issue.Status == "cancelled" || issue.Status == "blocked" || issue.Status == "in_review" {
+		slog.Info("stream disconnect: issue already in terminal state, skipping run failure",
+			"run_id", util.UUIDToString(run.ID),
+			"issue_id", util.UUIDToString(issueID),
+			"issue_status", issue.Status,
+		)
+		return nil, nil
+	}
+
 	autopilot, err := s.Queries.GetAutopilot(ctx, run.AutopilotID)
 	if err != nil {
 		return nil, fmt.Errorf("load autopilot: %w", err)

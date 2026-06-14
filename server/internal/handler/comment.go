@@ -199,6 +199,10 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		req.Type = "comment"
 	}
+	if req.Type == "system" {
+		writeError(w, http.StatusBadRequest, "type 'system' is reserved for internal use")
+		return
+	}
 
 	var parentID pgtype.UUID
 	var parentComment *db.Comment
