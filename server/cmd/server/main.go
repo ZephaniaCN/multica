@@ -106,6 +106,7 @@ func main() {
 	// Start background workers.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	autopilotCtx, autopilotCancel := context.WithCancel(context.Background())
+	healthCtx, healthCancel := context.WithCancel(context.Background())
 	taskSvc := service.NewTaskService(queries, pool, hub, bus)
 	autopilotSvc := service.NewAutopilotService(queries, pool, bus, taskSvc)
 	registerAutopilotListeners(bus, autopilotSvc)
@@ -116,6 +117,9 @@ func main() {
 	go runAutopilotScheduler(autopilotCtx, queries, autopilotSvc)
 	go runStreamDisconnectReconciler(autopilotCtx, autopilotSvc)
 	go runDBStatsLogger(sweepCtx, pool)
+
+	// Start health check detector for execution container monitoring.
+	go runHealthCheckDetector(healthCtx, queries, bus)
 
 	// Graceful shutdown
 	go func() {
@@ -133,6 +137,7 @@ func main() {
 	slog.Info("shutting down server")
 	sweepCancel()
 	autopilotCancel()
+	healthCancel()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

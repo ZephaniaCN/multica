@@ -316,6 +316,16 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 				})
 			})
 
+			// Health Check Events (execution container monitoring)
+			r.Route("/api/health-check", func(r chi.Router) {
+				r.Get("/", h.GetHealthCheckEvents)
+				r.Get("/stats", h.GetHealthCheckStats)
+				r.Route("/events/{id}", func(r chi.Router) {
+					r.Patch("/", h.ResolveHealthCheckEvent)
+				})
+			})
+			r.Get("/api/health-check/{resource_type}/{resource_id}", h.GetResourceHealthCheckEvents)
+
 			// Pins
 			r.Route("/api/pins", func(r chi.Router) {
 				r.Get("/", h.ListPins)
