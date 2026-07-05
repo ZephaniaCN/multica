@@ -106,7 +106,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/multica-backend
+          images: ghcr.io/${{ github.repository_owner | lower }}/multica-backend
           labels: |
             org.opencontainers.image.title=Multica Backend
             org.opencontainers.image.description=Multica self-hosted backend
@@ -135,7 +135,7 @@ jobs:
           build-args: |
             VERSION=${{ needs.verify.outputs.tag_name }}
             COMMIT=${{ github.sha }}
-          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/multica-backend,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner | lower }}/multica-backend,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -172,7 +172,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/multica-backend
+          images: ghcr.io/${{ github.repository_owner | lower }}/multica-backend
           flavor: |
             latest=false
           tags: |
@@ -192,12 +192,12 @@ jobs:
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf 'ghcr.io/${{ github.repository_owner }}/multica-backend@sha256:%s ' *)
+            $(printf 'ghcr.io/${{ github.repository_owner | lower }}/multica-backend@sha256:%s ' *)
 
       - name: Inspect image
         run: |
           docker buildx imagetools inspect \
-            ghcr.io/${{ github.repository_owner }}/multica-backend:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ github.repository_owner | lower }}/multica-backend:${{ steps.meta.outputs.version }}
 
   docker-web-build:
     needs: verify
@@ -223,7 +223,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/multica-web
+          images: ghcr.io/${{ github.repository_owner | lower }}/multica-web
           labels: |
             org.opencontainers.image.title=Multica Web
             org.opencontainers.image.description=Multica self-hosted web frontend
@@ -252,7 +252,7 @@ jobs:
           build-args: |
             REMOTE_API_URL=http://backend:8080
             NEXT_PUBLIC_APP_VERSION=${{ needs.verify.outputs.tag_name }}
-          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/multica-web,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner | lower }}/multica-web,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -289,7 +289,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/multica-web
+          images: ghcr.io/${{ github.repository_owner | lower }}/multica-web
           flavor: |
             latest=false
           tags: |
@@ -309,12 +309,12 @@ jobs:
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf 'ghcr.io/${{ github.repository_owner }}/multica-web@sha256:%s ' *)
+            $(printf 'ghcr.io/${{ github.repository_owner | lower }}/multica-web@sha256:%s ' *)
 
       - name: Inspect image
         run: |
           docker buildx imagetools inspect \
-            ghcr.io/${{ github.repository_owner }}/multica-web:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ github.repository_owner | lower }}/multica-web:${{ steps.meta.outputs.version }}
 
   # Build the Desktop installers for Linux and Windows and upload them to
   # the GitHub Release that the `release` job above just published. macOS
