@@ -53,6 +53,9 @@ export interface AutopilotRun {
   trigger_payload: unknown;
   result: unknown;
   created_at: string;
+  is_compensation?: boolean;
+  retry_of?: string | null;
+  compensation_key?: string | null;
 }
 
 export interface CreateAutopilotRequest {
